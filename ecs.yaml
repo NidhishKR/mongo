@@ -1,0 +1,157 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  VPC:
+    Type: String
+    Description: Provide the VPC ID.
+    Default: vpc-457bbb3c
+  TagName:
+    Type: String
+    Description: Tag Name of your Infrastructure.
+    Default: tag
+  ECSClusterName:
+    Type: String
+    Description: Name of an existing ECS Cluster.
+    Default: nidhish
+  PublicSubnetAZ1:
+    Description: Public Subnet ID in Availability Zone 1.
+    Type: String
+    Default: subnet-3eb16712
+  PublicSubnetAZ2:
+    Description: Public Subnet ID in Availability Zone 2.
+    Type: String
+    Default: subnet-bede8782
+  PublicSecurityGroupID:
+    Description: Public Security Group ID for LoadBalancer.
+    Type: String
+    Default: sg-57e3bf29
+Resources:
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [mongoLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: mongo
+      ContainerDefinitions:
+      - Name: mongodb
+        Cpu: '256'
+        Essential: 'true'
+        Image: mongo
+        Memory: '128'
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: mongo
+        PortMappings:
+        - ContainerPort: 27017
+          HostPort: 0
+      - Name: mongoseed
+        Cpu: '256'
+        Essential: 'true'
+        Image: nidhishkr/mongoseed
+        Memory: '128'
+        Links: ["mongo"]
+        Environment:
+        - Name: AWS_DEFAULT_REGION
+          Value: <region_name>
+        - Name: AWS_ACCESS_KEY_ID
+          Value: <aws_acess_key>
+        - Name: AWS_SECRET_ACCESS_KEY
+          Value: <aws_secret_key>
+        LogConfiguration:
+          LogDriver: awslogs
+          Options:
+            awslogs-group: !Ref 'CloudwatchLogsGroup'
+            awslogs-region: !Ref 'AWS::Region'
+            awslogs-stream-prefix: nidhishkr/node-tod
+        PortMappings:
+        - ContainerPort: 7070
+          HostPort: 0
+      Volumes:
+            - Name: my-vol
+  mongoService:
+    Type: AWS::ECS::Service
+    DependsOn: mongoALBListener
+    Properties:
+     Cluster: !Ref 'ECSClusterName'
+     DesiredCount: '1'
+     LoadBalancers:
+     - ContainerName: mongo
+       ContainerPort: '27017'
+       TargetGroupArn: !Ref 'mongoTargetGroup'
+     Role: !Ref 'ECSServiceRole'
+     TaskDefinition: !Ref 'TaskDefinition'
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+  ECSServicePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: "ecs-service"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: ['elasticloadbalancing:*', 'ec2:*', 's3:*']
+            Resource: '*'
+      Roles: [!Ref 'ECSServiceRole']
+  mongoALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: mongo-ALB
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '30'
+      Subnets:
+        - !Ref PublicSubnetAZ1
+        - !Ref PublicSubnetAZ2
+      SecurityGroups:
+        - !Ref PublicSecurityGroupID
+  mongoTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: mongoALB
+    Properties:
+      HealthCheckIntervalSeconds: 10
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      Name: mongo
+      Port: 80
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId: !Ref 'VPC'
+  mongoALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: ECSServiceRole
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'mongoTargetGroup'
+      LoadBalancerArn: !Ref 'mongoALB'
+      Port: '80'
+      Protocol: HTTP
+  ECSALBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    DependsOn: mongoALBListener
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'mongoTargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values: [/]
+      ListenerArn: !Ref 'mongoALBListener'
+      Priority: 1
